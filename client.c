@@ -33,11 +33,15 @@ int acquire_frame(const char *filename) {
     char command[256];
     
     // Construct the command string using snprintf.
-    // "fswebcam" is the external tool. 
+    // "command" will hold the full command to be executed.
+    // "sizeof(command)" ensures we do not exceed buffer size.
+    // "fswebcam" is the external tool to take a picture from webcam. 
     // "-r 640x480": set resolution.
     // "--jpeg 85": set format to JPEG with 85% quality.
-    // "--no-banner": disable the text overlay.
-    // "-q": quiet mode (less output).
+    // "--no-banner": disable the text overlay (date, time and name on the camera).
+    // "-q": quiet mode (less output on the terminal).
+    // "%s": placeholder for the filename string name.
+    // "filename": output file name.
     snprintf(command, sizeof(command), "fswebcam -r 640x480 --jpeg 85 --no-banner -q %s", filename);
     
     // Print status to console.
@@ -70,6 +74,7 @@ void send_frame_to_server(const char *filename) {
     FILE *fp;
 
     // Create a TCP socket.
+    // Details: AF_INET = IPv4, SOCK_STREAM = TCP, 0 = Protocol (IP); check errors and assign the socket to sock
     if ((sock = socket(AF_INET, SOCK_STREAM, 0)) < 0) {
         // Print error if socket creation fails.
         perror("Socket creation error");
@@ -83,6 +88,10 @@ void send_frame_to_server(const char *filename) {
     serv_addr.sin_port = htons(PORT);
 
     // Convert IPv4 address from text to binary form and store it in serv_addr.
+    // stays for "presentation to network", and converts an ip address from text (192.168...) to binary format
+    // AF_INET indicates it's an IPv4 address
+    // SERVER_IP is the string representation of the IP address
+    // &serv_addr.sin_addr is where the converted address will be stored
     if (inet_pton(AF_INET, SERVER_IP, &serv_addr.sin_addr) <= 0) {
         // Print error if IP address is invalid.
         perror("Invalid address/ Address not supported");
