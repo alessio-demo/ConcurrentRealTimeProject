@@ -1,190 +1,285 @@
 /**
  * @file client.c
- * @brief TCP Client for acquiring webcam frames and sending them to the server.
+ * @brief V4L2 Client acting as a Producer. Captures frames directly from the kernel driver using Memory Mapping and sends them over TCP.
  */
 
-// Include standard I/O library.
 #include <stdio.h>
-// Include standard library.
 #include <stdlib.h>
-// Include string manipulation library.
 #include <string.h>
-// Include POSIX operating system API (unistd.h).
-#include <unistd.h>
-// Include definitions for internet operations.
-#include <arpa/inet.h>
-// Include main socket definitions.
-#include <sys/socket.h>
+#include <fcntl.h>              
+#include <unistd.h>             
+#include <errno.h>              
+#include <sys/ioctl.h>          
+#include <sys/mman.h>           
+#include <sys/socket.h>         
+#include <arpa/inet.h>          
+#include <linux/videodev2.h>    
 
-// Define the Server IP address (Localhost for testing).
-#define SERVER_IP "127.0.0.1" 
-// Define the port number to connect to.
-#define PORT 8080
-// Define buffer size for file reading.
-#define BUFFER_SIZE 1024
+/* Defines the device path, resolution, and server connection details. */
+#define DEVICE "/dev/video0"
+#define WIDTH 640
+#define HEIGHT 480
+#define SERVER_IP "127.0.0.1"
+#define SERVER_PORT 8080
+#define FRAME_COUNT 10
 
-/**
- * @brief Acquires a frame using a system command.
- * @param filename The name of the file to be created.
- * @return int 0 on success, -1 on failure.
- */
-int acquire_frame(const char *filename) {
-    // Buffer to hold the shell command string.
-    char command[256];
-    
-    // Construct the command string using snprintf.
-    // "command" will hold the full command to be executed.
-    // "sizeof(command)" ensures we do not exceed buffer size.
-    // "fswebcam" is the external tool to take a picture from webcam. 
-    // "-r 640x480": set resolution.
-    // "--jpeg 85": set format to JPEG with 85% quality.
-    // "--no-banner": disable the text overlay (date, time and name on the camera).
-    // "-q": quiet mode (less output on the terminal).
-    // "%s": placeholder for the filename string name.
-    // "filename": output file name.
-    snprintf(command, sizeof(command), "fswebcam -r 640x480 --jpeg 85 --no-banner -q %s", filename);
-    
-    // Print status to console.
-    printf("[CLIENT] Acquiring frame: %s\n", filename);
-    
-    // Execute the command in the shell. system() returns the exit status.
-    int status = system(command);
-    
-    // Check if the command executed successfully (0 usually means success).
-    if (status != 0) {
-        // Print error to standard error output.
-        fprintf(stderr, "[ERROR] Frame acquisition failed. Is fswebcam installed?\n");
-        // Return error code.
-        return -1;
-    }
-    // Return success code.
-    return 0;
+/* Tracks memory buffers shared with the camera driver. Stores the user-space pointer and length for each buffer to enable data access. */
+struct buffer_info {
+    void *start;
+    size_t length;
+};
+
+struct buffer_info *buffers;
+unsigned int n_buffers;
+int fd_cam = -1;
+int fd_sock = -1;
+int frame_number = 0;
+
+/* Wrapper function for the ioctl system call. Retries the call automatically if interrupted by a system signal (EINTR), increasing robustness. */
+static int xioctl(int fh, int request, void *arg) {
+    int r;
+    do {
+        r = ioctl(fh, request, arg);
+    } while (-1 == r && errno == EINTR);
+    return r;
 }
 
 /**
- * @brief Sends the local file to the server via TCP.
- * @param filename The name of the file to send.
+ * @brief Handles network transmission of image data.
+ * Implements the client-side protocol: sends metadata first, followed by raw image data.
  */
-void send_frame_to_server(const char *filename) {
-    // File descriptor for the socket.
-    int sock = 0;
-    // Struct for server address configuration.
-    struct sockaddr_in serv_addr;
-    // File pointer for reading the local image.
-    FILE *fp;
-
-    // Create a TCP socket.
-    // Details: AF_INET = IPv4, SOCK_STREAM = TCP, 0 = Protocol (IP); check errors and assign the socket to sock
-    if ((sock = socket(AF_INET, SOCK_STREAM, 0)) < 0) {
-        // Print error if socket creation fails.
-        perror("Socket creation error");
-        // Exit function.
-        return;
-    }
-
-    // Set address family to IPv4.
-    serv_addr.sin_family = AF_INET;
-    // Set port number, converting to network byte order.
-    serv_addr.sin_port = htons(PORT);
-
-    // Convert IPv4 address from text to binary form and store it in serv_addr.
-    // stays for "presentation to network", and converts an ip address from text (192.168...) to binary format
-    // AF_INET indicates it's an IPv4 address
-    // SERVER_IP is the string representation of the IP address
-    // &serv_addr.sin_addr is where the converted address will be stored
-    if (inet_pton(AF_INET, SERVER_IP, &serv_addr.sin_addr) <= 0) {
-        // Print error if IP address is invalid.
-        perror("Invalid address/ Address not supported");
-        // Exit function.
-        return;
-    }
-
-    // Attempt to connect to the server.
-    if (connect(sock, (struct sockaddr *)&serv_addr, sizeof(serv_addr)) < 0) {
-        // Print error if connection fails (e.g., server not running).
-        perror("Connection Failed");
-        // Exit function.
-        return;
-    }
-
-    // Open the local file in binary read mode ("rb").
-    fp = fopen(filename, "rb");
-    // Check if file opened successfully.
-    if (fp == NULL) {
-        // Print error if file not found.
-        perror("File open error");
-        // Close the socket before returning.
-        close(sock);
-        // Exit function.
-        return;
-    }
-
-    // Move file pointer to the end of the file to calculate size.
-    fseek(fp, 0, SEEK_END);
-    // Get the current position (which is the file size in bytes).
-    long file_size = ftell(fp);
-    // Reset file pointer to the beginning of the file.
-    fseek(fp, 0, SEEK_SET); 
-
-    // --- PROTOCOL: SEND METADATA ---
+void send_frame_via_network(const void *p, int size) {
+    char filename[64];
     
-    // Calculate length of filename string.
+    /* Generates a sequential filename for each frame. Uses .raw extension as the data matches the camera sensor output (MJPEG/YUYV) without a container. */
+    sprintf(filename, "frame_%04d.raw", frame_number++);
+    
     int name_len = strlen(filename);
-    // Send filename length to server.
-    send(sock, &name_len, sizeof(name_len), 0);
+    long file_size = size;
 
-    // Send the actual filename string.
-    send(sock, filename, name_len, 0);
-
-    // Send the file size.
-    send(sock, &file_size, sizeof(file_size), 0);
-
-    // --- PROTOCOL: SEND DATA ---
-
-    // Buffer for reading file data.
-    char buffer[BUFFER_SIZE];
-    // Variable to track bytes read from file.
-    int bytes_read;
+    /* Sends filename length, filename string, and image payload size. This header enables the server to prepare for the incoming stream. */
+    send(fd_sock, &name_len, sizeof(name_len), 0);
+    send(fd_sock, filename, name_len, 0);
+    send(fd_sock, &file_size, sizeof(file_size), 0);
     
-    // Loop to read file in chunks and send them.
-    while ((bytes_read = fread(buffer, 1, BUFFER_SIZE, fp)) > 0) {
-        // Send the chunk of data to the server.
-        send(sock, buffer, bytes_read, 0);
+    /* Assumes pointer 'p' points to valid image data. Loops to send all bytes to the server socket, continuing until total_sent matches file size. */
+    long total_sent = 0;
+    while(total_sent < file_size) {
+        int sent = send(fd_sock, p + total_sent, file_size - total_sent, 0);
+        if(sent < 0) { 
+            perror("[CLIENT] Network send error"); 
+            break; 
+        }
+        total_sent += sent;
     }
-    
-    // Print success message.
-    printf("[CLIENT] Sent '%s' to server.\n", filename);
-
-    // Close the file.
-    fclose(fp);
-    // Close the socket connection.
-    close(sock);
+    printf("[CLIENT] Successfully transmitted %s (%d bytes)\n", filename, size);
 }
 
-// Main entry point of the client.
-int main() {
-    // Counter for the number of frames acquired.
-    int frame_count = 0;
-    // Buffer to hold the generated filename.
-    char filename[50];
+/**
+ * @brief Configures the V4L2 device and sets up Memory Mapping.
+ */
+void init_camera() {
+    struct v4l2_format fmt;
+    struct v4l2_requestbuffers req;
 
-    // Loop to capture 3 frames (as an example limit).
-    while (frame_count < 3) {
-        // Format the filename (e.g., "frame_0.jpg").
-        sprintf(filename, "frame_%d.jpg", frame_count);
+    /* Opens the video device in Read/Write mode. O_NONBLOCK flag ensures calls return immediately if data is not ready, preventing program freeze. */
+    fd_cam = open(DEVICE, O_RDWR | O_NONBLOCK, 0);
+    if (fd_cam < 0) { 
+        perror("Failed to open video device"); 
+        exit(1); 
+    }
+
+    /* Configures the image format, setting width, height, and pixel format. MJPEG is preferred for compression and smaller network transfer size. */
+    memset(&fmt, 0, sizeof(fmt));
+    fmt.type = V4L2_BUF_TYPE_VIDEO_CAPTURE;
+    fmt.fmt.pix.width = WIDTH;
+    fmt.fmt.pix.height = HEIGHT;
+    fmt.fmt.pix.pixelformat = V4L2_PIX_FMT_MJPEG; 
+    fmt.fmt.pix.field = V4L2_FIELD_INTERLACED;
+
+    /* Applies these settings to the hardware driver via ioctl. */
+    if (xioctl(fd_cam, VIDIOC_S_FMT, &fmt) == -1) {
+        perror("Error setting Pixel Format (MJPEG might not be supported)");
+        exit(1);
+    }
+
+    /* Requests allocation of 4 buffers in kernel memory. This enables 'streaming I/O', which is more efficient than read/write by avoiding data copies between kernel and user space. */
+    memset(&req, 0, sizeof(req));
+    req.count = 4;
+    req.type = V4L2_BUF_TYPE_VIDEO_CAPTURE;
+    req.memory = V4L2_MEMORY_MMAP;
+
+    if (xioctl(fd_cam, VIDIOC_REQBUFS, &req) == -1) {
+        perror("Error requesting buffer allocation");
+        exit(1);
+    }
+
+    /* Allocates array to track these buffers. */
+    buffers = calloc(req.count, sizeof(*buffers));
+    
+    /* Iterates through each driver-allocated buffer to map it into process memory. */
+    for (n_buffers = 0; n_buffers < req.count; ++n_buffers) {
+        struct v4l2_buffer buf;
         
-        // Call function to acquire frame from webcam.
-        if (acquire_frame(filename) == 0) {
-            // If acquisition successful, call function to send to server.
-            send_frame_to_server(filename);
+        memset(&buf, 0, sizeof(buf));
+        buf.type = V4L2_BUF_TYPE_VIDEO_CAPTURE;
+        buf.memory = V4L2_MEMORY_MMAP;
+        buf.index = n_buffers;
+
+        /* Queries the driver for details (offset and length) of the buffer at this index. */
+        if (xioctl(fd_cam, VIDIOC_QUERYBUF, &buf) == -1) {
+            perror("Query buffer error");
+            exit(1);
         }
 
-        // Increment frame counter.
-        frame_count++;
-        // Pause execution for 2 seconds before next capture.
-        sleep(2); 
+        buffers[n_buffers].length = buf.length;
+        
+        /* Maps device memory (buf.m.offset) directly to a user-space pointer (buffers[n_buffers].start) using mmap. This implements the 'Zero-Copy' mechanism. */
+        buffers[n_buffers].start = mmap(NULL, buf.length,
+                                      PROT_READ | PROT_WRITE, MAP_SHARED,
+                                      fd_cam, buf.m.offset);
+    
+        if (MAP_FAILED == buffers[n_buffers].start) {
+            perror("Memory Map failed");
+            exit(1);
+        }
+    }
+}
+
+/**
+ * @brief Initializes the capture process by queuing buffers and enabling the stream.
+ */
+void start_capturing() {
+    enum v4l2_buf_type type;
+    
+    /* Enqueues all empty buffers into the driver's incoming queue, providing memory locations for storing video frames. */
+    for (int i = 0; i < n_buffers; ++i) {
+        struct v4l2_buffer buf;
+        memset(&buf, 0, sizeof(buf));
+        buf.type = V4L2_BUF_TYPE_VIDEO_CAPTURE;
+        buf.memory = V4L2_MEMORY_MMAP;
+        buf.index = i;
+        
+        if (xioctl(fd_cam, VIDIOC_QBUF, &buf) == -1) 
+            perror("Queue Buffer error");
     }
 
-    // Return success code.
+    /* Sends STREAMON command to hardware to begin capturing images and filling queued buffers. */
+    type = V4L2_BUF_TYPE_VIDEO_CAPTURE;
+    if (xioctl(fd_cam, VIDIOC_STREAMON, &type) == -1) 
+        perror("Stream ON error");
+}
+
+/**
+ * @brief Retrieves a filled buffer, processes it, and returns it to the driver.
+ */
+int read_frame() {
+    struct v4l2_buffer buf;
+    
+    memset(&buf, 0, sizeof(buf));
+    buf.type = V4L2_BUF_TYPE_VIDEO_CAPTURE;
+    buf.memory = V4L2_MEMORY_MMAP;
+
+    /* Dequeues a buffer from the driver's outgoing queue containing a valid video frame. Returns EAGAIN if no buffer is ready due to non-blocking mode. */
+    if (xioctl(fd_cam, VIDIOC_DQBUF, &buf) == -1) {
+        if (errno == EAGAIN) return 0; 
+        perror("Dequeue Buffer error");
+        return -1;
+    }
+
+    /* Passes the pointer to raw image data (buffers[buf.index].start) to the network function. Uses buf.bytesused for exact frame size. */
+    send_frame_via_network(buffers[buf.index].start, buf.bytesused);
+
+    /* Enqueues the buffer back to the driver for reuse, maintaining the circular buffer cycle. */
+    if (xioctl(fd_cam, VIDIOC_QBUF, &buf) == -1) 
+        perror("Re-Queue Buffer error");
+    
+    return 1;
+}
+
+/**
+ * @brief Main loop synchronizing capture and transmission using select().
+ */
+void main_loop() {
+    int count = FRAME_COUNT;
+    
+    while (count > 0) {
+        fd_set fds;
+        struct timeval tv;
+        int r;
+
+        /* Uses select system call to wait efficiently. Avoids busy waiting by sleeping until the camera file descriptor is ready or timeout expires. */
+        FD_ZERO(&fds);
+        FD_SET(fd_cam, &fds);
+
+        tv.tv_sec = 2;
+        tv.tv_usec = 0;
+
+        r = select(fd_cam + 1, &fds, NULL, NULL, &tv);
+
+        if (-1 == r) { 
+            perror("Select system call error"); 
+            break; 
+        }
+        if (0 == r) { 
+            fprintf(stderr, "Select timeout: Camera is not producing data.\n"); 
+            continue; 
+        }
+
+        /* Calls read_frame to process data if select returns a positive number indicating readiness. */
+        if (read_frame()) 
+            count--; 
+    }
+}
+
+/**
+ * @brief Establishes the network connection.
+ */
+void init_network() {
+    struct sockaddr_in serv_addr;
+    
+    /* Creates a standard TCP socket. */
+    if ((fd_sock = socket(AF_INET, SOCK_STREAM, 0)) < 0) { 
+        perror("Socket creation error"); 
+        exit(1); 
+    }
+    
+    serv_addr.sin_family = AF_INET;
+    serv_addr.sin_port = htons(SERVER_PORT);
+    
+    /* Converts IP address string to binary form. */
+    if(inet_pton(AF_INET, SERVER_IP, &serv_addr.sin_addr) <= 0) { 
+        perror("Invalid IP Address"); 
+        exit(1); 
+    }
+    
+    /* Attempts to establish a connection to the server. */
+    if (connect(fd_sock, (struct sockaddr *)&serv_addr, sizeof(serv_addr)) < 0) {
+        perror("Connection Failed");
+        exit(1);
+    }
+}
+
+int main() {
+    /* Establishes connection to the storage server. */
+    init_network(); 
+
+    /* Configures the camera driver and maps memory buffers. */
+    init_camera();    
+
+    /* Signals the camera to start streaming frames to buffers. */
+    start_capturing();
+    
+    printf("[INFO] Starting capture loop for %d frames...\n", FRAME_COUNT);
+    
+    /* Enters the loop to consume frames and send them via network. */
+    main_loop();      
+    
+    printf("[INFO] Operations finished. Closing resources.\n");
+
+    /* Closes file descriptors for a clean shutdown. */
+    close(fd_sock);
+    close(fd_cam);
+    
     return 0;
 }
