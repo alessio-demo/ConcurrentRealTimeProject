@@ -31,8 +31,8 @@ struct buffer_info {
 
 struct buffer_info *buffers;
 unsigned int n_buffers;
-int fd_cam = -1;
-int fd_sock = -1;
+int fd_cam = -1; // File descriptor for the camera device
+int fd_sock = -1; // File descriptor for the network socket
 int frame_number = 0;
 
 /* Wrapper function for the ioctl system call. Retries the call automatically if interrupted by a system signal (EINTR), increasing robustness. */
@@ -40,7 +40,7 @@ static int xioctl(int fh, int request, void *arg) {
     int r;
     do {
         r = ioctl(fh, request, arg);
-    } while (-1 == r && errno == EINTR);
+    } while (-1 == r && errno == EINTR); // Retry if  ioctl interrupted by signal
     return r;
 }
 
@@ -58,14 +58,14 @@ void send_frame_via_network(const void *p, int size) {
     long file_size = size;
 
     /* Sends filename length, filename string, and image payload size. This header enables the server to prepare for the incoming stream. */
-    send(fd_sock, &name_len, sizeof(name_len), 0);
-    send(fd_sock, filename, name_len, 0);
-    send(fd_sock, &file_size, sizeof(file_size), 0);
+    send(fd_sock, &name_len, sizeof(name_len), 0); // send the length of the filename to the server
+    send(fd_sock, filename, name_len, 0); // send the filename string to the server
+    send(fd_sock, &file_size, sizeof(file_size), 0); // send the size of the image payload to the server
     
     /* Assumes pointer 'p' points to valid image data. Loops to send all bytes to the server socket, continuing until total_sent matches file size. */
     long total_sent = 0;
     while(total_sent < file_size) {
-        int sent = send(fd_sock, p + total_sent, file_size - total_sent, 0);
+        int sent = send(fd_sock, p + total_sent, file_size - total_sent, 0); // sends a portion of the image data from the 'p' pointer
         if(sent < 0) { 
             perror("[CLIENT] Network send error"); 
             break; 
@@ -79,8 +79,8 @@ void send_frame_via_network(const void *p, int size) {
  * @brief Configures the V4L2 device and sets up Memory Mapping.
  */
 void init_camera() {
-    struct v4l2_format fmt;
-    struct v4l2_requestbuffers req;
+    struct v4l2_format fmt; // Image format structure
+    struct v4l2_requestbuffers req; // Buffer request structure
 
     /* Opens the video device in Read/Write mode. O_NONBLOCK flag ensures calls return immediately if data is not ready, preventing program freeze. */
     fd_cam = open(DEVICE, O_RDWR | O_NONBLOCK, 0);
@@ -91,11 +91,11 @@ void init_camera() {
 
     /* Configures the image format, setting width, height, and pixel format. MJPEG is preferred for compression and smaller network transfer size. */
     memset(&fmt, 0, sizeof(fmt));
-    fmt.type = V4L2_BUF_TYPE_VIDEO_CAPTURE;
-    fmt.fmt.pix.width = WIDTH;
-    fmt.fmt.pix.height = HEIGHT;
-    fmt.fmt.pix.pixelformat = V4L2_PIX_FMT_MJPEG; 
-    fmt.fmt.pix.field = V4L2_FIELD_INTERLACED;
+    fmt.type = V4L2_BUF_TYPE_VIDEO_CAPTURE; // Specifies we are configuring video capture settings
+    fmt.fmt.pix.width = WIDTH; // Sets image width
+    fmt.fmt.pix.height = HEIGHT; // Sets image height
+    fmt.fmt.pix.pixelformat = V4L2_PIX_FMT_MJPEG; // Sets pixel format to MJPEG
+    fmt.fmt.pix.field = V4L2_FIELD_INTERLACED; // Sets field type
 
     /* Applies these settings to the hardware driver via ioctl. */
     if (xioctl(fd_cam, VIDIOC_S_FMT, &fmt) == -1) {
@@ -105,10 +105,11 @@ void init_camera() {
 
     /* Requests allocation of 4 buffers in kernel memory. This enables 'streaming I/O', which is more efficient than read/write by avoiding data copies between kernel and user space. */
     memset(&req, 0, sizeof(req));
-    req.count = 4;
-    req.type = V4L2_BUF_TYPE_VIDEO_CAPTURE;
-    req.memory = V4L2_MEMORY_MMAP;
+    req.count = 4; // Requests 4 buffers from driver
+    req.type = V4L2_BUF_TYPE_VIDEO_CAPTURE; // Specifies buffer type
+    req.memory = V4L2_MEMORY_MMAP; // Specifies memory mapping I/O method
 
+    // Sends request to driver to allocate buffers.
     if (xioctl(fd_cam, VIDIOC_REQBUFS, &req) == -1) {
         perror("Error requesting buffer allocation");
         exit(1);
@@ -135,9 +136,9 @@ void init_camera() {
         buffers[n_buffers].length = buf.length;
         
         /* Maps device memory (buf.m.offset) directly to a user-space pointer (buffers[n_buffers].start) using mmap. This implements the 'Zero-Copy' mechanism. */
-        buffers[n_buffers].start = mmap(NULL, buf.length,
-                                      PROT_READ | PROT_WRITE, MAP_SHARED,
-                                      fd_cam, buf.m.offset);
+        buffers[n_buffers].start = mmap(NULL, buf.length, // Maps buffer into user space
+                                      PROT_READ | PROT_WRITE, MAP_SHARED, // permissions reading/writing and shared mapping
+                                      fd_cam, buf.m.offset); // offset provided by driver
     
         if (MAP_FAILED == buffers[n_buffers].start) {
             perror("Memory Map failed");
@@ -156,17 +157,17 @@ void start_capturing() {
     for (int i = 0; i < n_buffers; ++i) {
         struct v4l2_buffer buf;
         memset(&buf, 0, sizeof(buf));
-        buf.type = V4L2_BUF_TYPE_VIDEO_CAPTURE;
-        buf.memory = V4L2_MEMORY_MMAP;
+        buf.type = V4L2_BUF_TYPE_VIDEO_CAPTURE; // Specifies buffer type
+        buf.memory = V4L2_MEMORY_MMAP; // Specifies memory mapping I/O method
         buf.index = i;
         
-        if (xioctl(fd_cam, VIDIOC_QBUF, &buf) == -1) 
+        if (xioctl(fd_cam, VIDIOC_QBUF, &buf) == -1) //put the buffer in the driver queue
             perror("Queue Buffer error");
     }
 
     /* Sends STREAMON command to hardware to begin capturing images and filling queued buffers. */
     type = V4L2_BUF_TYPE_VIDEO_CAPTURE;
-    if (xioctl(fd_cam, VIDIOC_STREAMON, &type) == -1) 
+    if (xioctl(fd_cam, VIDIOC_STREAMON, &type) == -1) // start streaming
         perror("Stream ON error");
 }
 
@@ -177,8 +178,8 @@ int read_frame() {
     struct v4l2_buffer buf;
     
     memset(&buf, 0, sizeof(buf));
-    buf.type = V4L2_BUF_TYPE_VIDEO_CAPTURE;
-    buf.memory = V4L2_MEMORY_MMAP;
+    buf.type = V4L2_BUF_TYPE_VIDEO_CAPTURE; // Specifies buffer type
+    buf.memory = V4L2_MEMORY_MMAP; // Specifies memory mapping I/O method
 
     /* Dequeues a buffer from the driver's outgoing queue containing a valid video frame. Returns EAGAIN if no buffer is ready due to non-blocking mode. */
     if (xioctl(fd_cam, VIDIOC_DQBUF, &buf) == -1) {
@@ -209,13 +210,13 @@ void main_loop() {
         int r;
 
         /* Uses select system call to wait efficiently. Avoids busy waiting by sleeping until the camera file descriptor is ready or timeout expires. */
-        FD_ZERO(&fds);
-        FD_SET(fd_cam, &fds);
+        FD_ZERO(&fds); // Clears the set
+        FD_SET(fd_cam, &fds); // Adds camera fd to the set
 
-        tv.tv_sec = 2;
-        tv.tv_usec = 0;
+        tv.tv_sec = 2; // Sets timeout to 2 seconds
+        tv.tv_usec = 0; // Sets microseconds to 0
 
-        r = select(fd_cam + 1, &fds, NULL, NULL, &tv);
+        r = select(fd_cam + 1, &fds, NULL, NULL, &tv); // Waits for camera fd to be ready or timeout
 
         if (-1 == r) { 
             perror("Select system call error"); 
