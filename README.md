@@ -90,11 +90,11 @@ gcc server.c -o server
 gcc client.c -o client
 ```
 Next you need to execute first the server and next the client:
-```bash
-# 1. Compile the Server
+
+# 1. Execute the Server
 ./server
 
-# 2. Compile the Client
+# 2. Execute the Client
 ./client
-```
+
 10 raw images will be generated.
