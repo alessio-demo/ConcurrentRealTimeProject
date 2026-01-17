@@ -72,7 +72,7 @@ Since TCP is a stream-oriented protocol, a custom application-layer protocol is 
 
 ## 4. Compilation Instructions
 
-The project depends only on standard Linux system libraries (`glibc`). No external dependencies are required.
+The project depends only on standard Linux system libraries (`glibc`) which provides standard implementations of all basic C functions (those found in `<stdio.h>`, `<stdlib.h>`, `<string.h>`, etc.) and ‘wrappers’ for communicating with the Linux kernel.. No external dependencies are required.
 
 ### Prerequisites
 * A Linux environment (Ubuntu/Debian recommended).
@@ -91,10 +91,17 @@ gcc client.c -o client
 ```
 Next you need to execute first the server and next the client:
 
+```bash
 # 1. Execute the Server
 ./server
 
 # 2. Execute the Client
 ./client
+```
 
 10 raw images will be generated.
+
+## 4. Troubleshooting
+
+* Bind failed: Address already in use: If the server fails to start, the port 8080 might be occupied. Wait a few seconds or kill the previous process using: `fuser -k 8080/tcp`
+* Cannot open `/dev/video0`: Ensure your user has permission to access the webcam. Try running: sudo chmod 666 /dev/video0 or add your user to the video group.
