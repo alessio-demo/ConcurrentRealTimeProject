@@ -37,6 +37,37 @@ The data flow moves from the hardware to the disk through a network socket, mini
                                       
 ```
 
+The graph is divided into three layers: `Hardware`, `Kernel Space` (Operating System), and `User Space` (Applications).
+
+### Hardware Application
+
+`Video Sensor` → `Kernel Buffer`: The webcam sensor captures the image frame.
+
+`DMA`: Instead of passing through the CPU, the data is "shot" directly from the sensor into the RAM (Kernel Buffer).
+
+### Passing to Client
+
+`Kernel Buffer` → `Client (Producer)`: This is where the core V4L2 operation happens.
+
+`MMAP (Memory Mapping)`: Instead of copying data from the Kernel to your program (which would be slow and CPU-intensive), your Client program "maps" (direct access) that specific portion of Kernel memory.
+This implements the Zero-Copy concept: the Client reads the data exactly where the hardware placed it, without duplicating it.
+
+### Network Transmission
+
+`Client` → `Server`: Once the Client obtains the pointer to the data (via MMAP), it sends the data over the network.
+
+`TCP Socket`: The data travels through the TCP protocol; the Client is responsible only for acquiring data quickly, while the network handles the transfer to the storage unit.
+
+### Storage
+
+`Server` → `Local Disk`: The Server receives the data packets from the network.
+
+`fwrite`: The Server uses the standard C function fwrite to physically write the bytes onto the hard drive.
+
+
+
+
+
 ## 2. Source Files Description
 
 The project consists of two main C source files.
