@@ -65,9 +65,6 @@ This implements the Zero-Copy concept: the Client reads the data exactly where t
 `fwrite`: The Server uses the standard C function fwrite to physically write the bytes onto the hard drive.
 
 
-
-
-
 ## 2. Source Files Description
 
 The project consists of two main C source files.

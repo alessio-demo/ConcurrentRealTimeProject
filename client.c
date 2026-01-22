@@ -39,10 +39,10 @@ int frame_number = 0;
 static int xioctl(int fh, int request, void *arg) {
     int r;
     do {
-    /*  It is the system call that enables sending control and configuration commands to a device driver, performing operations that cannot be handled by standard read or write calls.
+    /*It is the system call that enables sending control and configuration commands to a device driver, performing operations that cannot be handled by standard read or write calls.
     In my project, I use it to set the video format, manage memory buffers, and start or stop the streaming.*/
         r = ioctl(fh, request, arg);
-        
+
     } while (-1 == r && errno == EINTR); // Retry if  ioctl interrupted by signal
     return r;
 }
